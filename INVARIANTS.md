@@ -221,3 +221,21 @@ If any of steps 1–3 slip, stop. Do not proceed to rewards. Rewards on top of a
 | Date | Change | Reason |
 | :--- | :--- | :--- |
 | 2026-10-21 | Initial spec — 9 invariants, 3 out-of-scope extensions | v1 design freeze before implementation |
+
+## 8. Known limitations (v1)
+
+### Reward payout is push, not pull
+
+`unstake` sends ETH to `msg.sender` via a low-level `call`. If the staker is a
+contract without a `receive()` function, the transfer fails and `unstake`
+reverts — locking the NFT in the staking contract indefinitely.
+
+**Workaround for stakers:** ensure your contract has a `receive()`.
+
+**v1.1 fix:** replace push with pull-over-push. Add `mapping(address => uint256)
+pendingWithdrawals`, accrue the reward on unstake instead of paying it, and add
+a separate `withdraw()` function. This decouples NFT return from reward claim.
+
+The current design was chosen for v1 simplicity; it does not introduce
+reentrancy risk (CEI ordering prevents that) but it does introduce a
+contract-staker lockup edge case.

@@ -49,4 +49,9 @@ contract MaliciousReceiver is IERC721Receiver {
         }
         return IERC721Receiver.onERC721Received.selector;
     }
+
+    // @notice Required to accept ETH reward from unstake. Also the secondary
+    ///         reentry surface — if the contract had reentrancy risk in the
+    ///         ETH payout, this is where it would fire.
+    receive() external payable {}
 }

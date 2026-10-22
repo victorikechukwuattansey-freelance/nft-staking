@@ -3,8 +3,9 @@ import { network } from "hardhat";
 
 // const { ethers } = await network.create();
 
-describe("Staking — lifecycle (I1, I2, I3, I7)", function () {
-  async function deployFixture() {
+describe("Staking — full lifecycle (I1–I7)", function () {
+  async function deployFixture(opts: { funded?: boolean } = {}) {
+    const funded = opts.funded ?? true;
     const { ethers, networkHelpers } = await network.create(); // or network.create()
     const [owner, victor, iyke] = await ethers.getSigners();
 
@@ -16,8 +17,16 @@ describe("Staking — lifecycle (I1, I2, I3, I7)", function () {
 
     const staking = await ethers.deployContract("Staking", [
       await nft.getAddress(),
+      owner.address,
     ]);
     await staking.waitForDeployment();
+
+    if (funded) {
+      // Fund enough for many tests' worth of stakes; each stake reserves 0.001 ETH
+      await staking
+        .connect(owner)
+        .fundRewards({ value: ethers.parseEther("1") });
+    }
 
     return { ethers, networkHelpers, nft, staking, owner, victor, iyke };
   }
@@ -169,5 +178,93 @@ describe("Staking — lifecycle (I1, I2, I3, I7)", function () {
     // I3: the stake is deleted
     const stake = await staking.stakes(0);
     expect(stake.owner).to.equal(ethers.ZeroAddress);
+  });
+
+  // ─── I5: Access control ──────────────────────────────────────────────
+
+  it("test_OwnerCanFundRewards — owner funds successfully", async function () {
+    const { ethers, staking, owner } = await deployFixture({ funded: false });
+
+    // now pool starts at 0, so the assertion is precise
+
+    const fundAmount = ethers.parseEther("0.01");
+    await (
+      await staking.connect(owner).fundRewards({ value: fundAmount })
+    ).wait();
+
+    expect(await staking.rewardPool()).to.equal(fundAmount);
+  });
+
+  it("test_RevertWhen_NonOwnerFundsRewards", async function () {
+    const { ethers, staking, victor } = await deployFixture();
+
+    await expect(
+      staking.connect(victor).fundRewards({ value: ethers.parseEther("0.01") }),
+    ).to.be.revertedWithCustomError(staking, "OwnableUnauthorizedAccount");
+  });
+
+  // ─── I4: Solvency ────────────────────────────────────────────────────
+
+  it("test_RevertWhen_StakeWithoutFunding", async function () {
+    const { nft, staking, victor } = await deployFixture({ funded: false });
+    const stakingAddr = await staking.getAddress();
+
+    await nft.connect(victor).approve(stakingAddr, 0);
+
+    // Pool is empty — stake must revert, not silently succeed
+    await expect(staking.connect(victor).stake(0)).to.be.revertedWith(
+      "Pool underfunded",
+    );
+  });
+
+  it("test_StakeReservesRewardFromPool", async function () {
+    const { ethers, nft, staking, owner, victor } = await deployFixture({
+      funded: false,
+    });
+    const stakingAddr = await staking.getAddress();
+
+    await (
+      await staking
+        .connect(owner)
+        .fundRewards({ value: ethers.parseEther("0.01") })
+    ).wait();
+    const poolBefore = await staking.rewardPool(); // 0.01
+
+    await nft.connect(victor).approve(stakingAddr, 0);
+    await staking.connect(victor).stake(0);
+
+    /// Pool decremented by exactly REWARD_AMOUNT
+    expect(await staking.rewardPool()).to.equal(
+      poolBefore - ethers.parseEther("0.001"),
+    );
+
+    const stake = await staking.stakes(0);
+    expect(stake.reward).to.equal(ethers.parseEther("0.001"));
+  });
+
+  it("test_UnstakePaysExactReward", async function () {
+    const { ethers, nft, staking, networkHelpers, owner, victor } =
+      await deployFixture({ funded: false });
+    const stakingAddr = await staking.getAddress();
+
+    await staking
+      .connect(owner)
+      .fundRewards({ value: ethers.parseEther("0.01") });
+    await nft.connect(victor).approve(stakingAddr, 0);
+    await staking.connect(victor).stake(0);
+
+    const stakeTime = await networkHelpers.time.latest();
+    await networkHelpers.time.setNextBlockTimestamp(
+      stakeTime + 7 * 24 * 60 * 60,
+    );
+
+    const balBefore = await ethers.provider.getBalance(victor.address);
+    const tx = await staking.connect(victor).unstake(0);
+    const receipt = await tx.wait();
+    const gasCost = receipt.gasUsed * receipt.gasPrice;
+    const balAfter = await ethers.provider.getBalance(victor.address);
+
+    // Balance increase minus gas paid must equal exactly REWARD_AMOUNT
+    expect(balAfter - balBefore + gasCost).to.equal(ethers.parseEther("0.001"));
   });
 });

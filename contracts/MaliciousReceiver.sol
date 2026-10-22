@@ -7,17 +7,22 @@ import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 interface IStaking {
     function stake(uint256 tokenId) external;
     function unstake(uint256 tokenId) external;
+    function withdraw() external;
 }
 
-/// @notice Adversarial staker. On receiving its NFT back from unstake,
-///         attempts to re-enter unstake for the same tokenId.
 contract MaliciousReceiver is IERC721Receiver {
     IStaking public immutable staking;
     IERC721 public immutable nft;
 
-    bool public reentered;
-    bool public reentrySucceeded;
-    bytes public reentryError;
+    // NFT callback reentry — fires during unstake's safeTransferFrom
+    bool public unstakeReentered;
+    bool public unstakeReentrySucceeded;
+    bytes public unstakeReentryError;
+
+    // ETH callback reentry — fires during withdraw's call{value}
+    bool public withdrawReentered;
+    bool public withdrawReentrySucceeded;
+    bytes public withdrawReentryError;
 
     constructor(address _staking, address _nft) {
         staking = IStaking(_staking);
@@ -33,25 +38,32 @@ contract MaliciousReceiver is IERC721Receiver {
         staking.unstake(tokenId);
     }
 
+    function doWithdraw() external {
+        staking.withdraw();
+    }
+
     function onERC721Received(
-        address,
-        address,
-        uint256 tokenId,
-        bytes calldata
+        address, address, uint256 tokenId, bytes calldata
     ) external override returns (bytes4) {
-        if (!reentered) {
-            reentered = true;
+        if (!unstakeReentered) {
+            unstakeReentered = true;
             try staking.unstake(tokenId) {
-                reentrySucceeded = true;
+                unstakeReentrySucceeded = true;
             } catch (bytes memory err) {
-                reentryError = err;
+                unstakeReentryError = err;
             }
         }
         return IERC721Receiver.onERC721Received.selector;
     }
 
-    // @notice Required to accept ETH reward from unstake. Also the secondary
-    ///         reentry surface — if the contract had reentrancy risk in the
-    ///         ETH payout, this is where it would fire.
-    receive() external payable {}
+    receive() external payable {
+        if (!withdrawReentered) {
+            withdrawReentered = true;
+            try staking.withdraw() {
+                withdrawReentrySucceeded = true;
+            } catch (bytes memory err) {
+                withdrawReentryError = err;
+            }
+        }
+    }
 }

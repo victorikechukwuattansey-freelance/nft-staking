@@ -1,8 +1,9 @@
 # Staking Contract — Invariant Specification
 
-**Version:** 1.0
+**Version:** 1.1
 **Scope:** NFT staking with fixed-duration lockup and single-shot reward payout
-**Status:** Specification — no implementation yet. `Staking.sol` must satisfy every property below.
+**Status:** Implemented — 18 tests passing, pull-over-push payout.
+ `Staking.sol` must satisfy every property below.
 
 This document is the contract's correctness contract. It was derived *before*
 the code, from first principles: enumerate the assets, the actors, the state,
@@ -122,13 +123,15 @@ violated), **Test name** (the Foundry/Hardhat test that asserts it), and **Type*
 - **Test name:** `test_RevertWhen_UnstakeTwice`
 - **Type:** adversarial — stake, warp full duration, unstake (success), unstake again → expect revert.
 
-### I4 — Reward solvency
-
+### I4 — Reward solvency (three buckets)
 - **Category:** invariant
-- **Statement:** At all times, `rewardPool >= Σ stakes[tokenId].reward` over all staked tokens. Equivalently: cumulative rewards paid out never exceed the ETH deposited via `fundRewards()`.
-- **Failure story:** Insolvency. If the pool runs out before all stakers are paid, the last to unstake get nothing. Worse: the contract's ETH balance could be drained by an earlier staker if reward math is wrong.
-- **Test name:** `testFuzz_PoolDecrementsByExactlyPaid`
-- **Type:** fuzz — random `fundRewards` amounts and reward values; assert `pool_after == pool_before - paid` on each unstake, and `pool >= 0` always.
+- **Statement:** At all times,
+  `address(this).balance >= rewardPool + Σ stakes[i].reward + Σ pendingWithdrawals[a]`.
+  Every stake reserves its reward from `rewardPool`; `unstake` moves the reward
+  to `pendingWithdrawals[staker]`; `withdraw` pays it out.
+- **Failure story:** Insolvency — later stakers find no ETH to claim.
+- **Test names:** `test_RevertWhen_StakeWithoutFunding`, `test_StakeReservesRewardFromPool`, `test_UnstakeRecordsPendingWithdrawal`, `test_WithdrawPaysPending`, `test_ContractSolvency`
+- **Type:** adversarial + fuzz
 
 ### I5 — Access control (owner-only mutation of pool)
 
@@ -138,15 +141,16 @@ violated), **Test name** (the Foundry/Hardhat test that asserts it), and **Type*
 - **Test name:** `test_RevertWhen_NonOwnerFundsRewards` (and future: `NonOwnerSetsDuration`, `NonOwnerPauses`)
 - **Type:** adversarial — `expectRevert` for each non-owner caller.
 
-### I6 — Atomicity and CEI ordering
-
+### I6 — CEI / atomicity
 - **Category:** invariant
-- **Statement:** If `unstake` reverts for any reason, no state changes persist. During a successful `unstake`, `delete stakes[tokenId]` and the `rewardPool` decrement execute **before** any external call (NFT transfer or ETH transfer).
-- **Failure story:** Classic reentrancy. If the NFT transfer or ETH transfer happens before state deletion, a malicious `onERC721Received` (or ETH fallback) callback could re-enter `unstake` and:
-  - (NFT case) unstake the same tokenId twice before deletion → contract releases a token it doesn't have, or releases another staker's token;
-  - (ETH case) claim the reward twice → pool drained.
-- **Test name:** `test_RevertWhen_MaliciousReceiverReenters`
-- **Type:** adversarial — a malicious ERC-721 receiver that re-enters `unstake` from `onERC721Received`; expect the outer call to revert and no state to change.
+- **Statement:** Both `unstake` and `withdraw` update all state **before** any
+  external call. `unstake` deletes `stakes[tokenId]` and credits
+  `pendingWithdrawals[msg.sender]` before the NFT transfer. `withdraw` zeroes
+  `pendingWithdrawals[msg.sender]` before the ETH `call`.
+- **Failure story:** Reentrancy — malicious `onERC721Received` releases two
+  NFTs; malicious `receive()` claims the reward twice.
+- **Test names:** `test_ReentrancyDuringUnstakeFails`, `test_ReentrancyDuringWithdrawFails`
+- **Type:** adversarial
 
 ### I7 — Duration lockup
 
@@ -171,6 +175,15 @@ violated), **Test name** (the Foundry/Hardhat test that asserts it), and **Type*
 - **Failure story:** If the owner can withdraw from `rewardPool` after stakers are committed, the pool can be drained while stakers are locked, making the contract insolvent when they unstake.
 - **Test name:** `test_RevertWhen_OwnerWithdrawsDirectly` — expects that no such function exists, or that calling any direct-withdraw function reverts.
 - **Type:** adversarial — check that the ABI surface contains no `withdraw` on the owner's side, or that any such function fails.
+
+### I10 — Pending withdrawal solvency
+- **Category:** invariant
+- **Statement:** `address(this).balance >= Σ pendingWithdrawals[a]` across all
+  addresses. No address can withdraw more than `pendingWithdrawals[addr]`.
+- **Failure story:** A credited staker's `withdraw()` reverts because the
+  contract is short on ETH — pool was spent on other payouts.
+- **Test name:** `test_ContractSolvency` (covers I4 + I10 jointly)
+- **Type:** fuzz
 
 ---
 
@@ -221,21 +234,26 @@ If any of steps 1–3 slip, stop. Do not proceed to rewards. Rewards on top of a
 | Date | Change | Reason |
 | :--- | :--- | :--- |
 | 2026-10-21 | Initial spec — 9 invariants, 3 out-of-scope extensions | v1 design freeze before implementation |
+| 2026-10-22 | v1.1.0: pull-over-push payout | Removes lockup for contract stakers; I4 grows to three buckets; I6 moves to `withdraw`; I10 added |
 
-## 8. Known limitations (v1)
+## 8. Known limitations (v1.1)
 
-### Reward payout is push, not pull
+### Pull-over-push is implemented
 
-`unstake` sends ETH to `msg.sender` via a low-level `call`. If the staker is a
-contract without a `receive()` function, the transfer fails and `unstake`
-reverts — locking the NFT in the staking contract indefinitely.
+v1.0 pushed rewards directly during `unstake`, which locked NFTs staked by
+contracts without a `receive()` function. v1.1 uses pull-over-push:
 
-**Workaround for stakers:** ensure your contract has a `receive()`.
+- `unstake` credits `pendingWithdrawals[msg.sender]` instead of transferring ETH
+- A separate `withdraw()` pays the caller's own pending balance
+- NFT return and reward claim are decoupled — every staker can unstake
 
-**v1.1 fix:** replace push with pull-over-push. Add `mapping(address => uint256)
-pendingWithdrawals`, accrue the reward on unstake instead of paying it, and add
-a separate `withdraw()` function. This decouples NFT return from reward claim.
+The contract now tracks three ETH buckets: `rewardPool` (unreserved),
+`stakes[i].reward` (reserved but locked), and `pendingWithdrawals` (reserved
+and claimable). I4 asserts the contract balance covers all three.
 
-The current design was chosen for v1 simplicity; it does not introduce
-reentrancy risk (CEI ordering prevents that) but it does introduce a
-contract-staker lockup edge case.
+### Reward is fixed, not time-weighted
+`REWARD_AMOUNT` is a constant. A staker who stays 7 days and one who stays 30
+days earn the same.
+
+### Single stake per token
+No aggregation across multiple tokens per user.

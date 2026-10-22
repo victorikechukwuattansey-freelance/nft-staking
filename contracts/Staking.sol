@@ -23,9 +23,11 @@ contract Staking is IERC721Receiver, ReentrancyGuard, Ownable {
 
     uint256 public rewardPool;
     mapping(uint256 tokenId => StakeInfo) public stakes;
+    mapping(address => uint256) public pendingWithdrawals;
 
     event Staked(uint256 indexed tokenId, address indexed owner, uint256 reward);
     event Unstaked(uint256 indexed tokenId, address indexed owner, uint256 reward);
+    event Withdrawn(address indexed staker, uint256 amount);
     event Funded(address indexed funder, uint256 amount);
 
     constructor(address _nft, address _initialOwner) Ownable(_initialOwner) {
@@ -50,9 +52,6 @@ contract Staking is IERC721Receiver, ReentrancyGuard, Ownable {
         emit Staked(tokenId, msg.sender, REWARD_AMOUNT);
     }
 
-    
-
-
     /// @notice Return the staked NFT to the recorded staker, after lockup.
     /// @dev I2: only the recorded staker can call this.
     ///      I7: reverts if lockup has not elapsed.
@@ -70,14 +69,24 @@ contract Staking is IERC721Receiver, ReentrancyGuard, Ownable {
     
         // CEI: state changes before external call
         delete stakes[tokenId];
+        pendingWithdrawals[msg.sender] += info.reward;   // credit, don't pay
     
         nft.safeTransferFrom(address(this), msg.sender, tokenId);
 
-        uint256 reward = info.reward;
-        (bool ok, ) = payable(msg.sender).call{value: reward}("");
-        require(ok, "Reward transfer failed");
+        emit Unstaked(tokenId, msg.sender, info.reward);
+    }
 
-        emit Unstaked(tokenId, msg.sender, reward);
+    function withdraw() external nonReentrant {
+        uint256 amount = pendingWithdrawals[msg.sender];
+        require(amount > 0, "Nothing to withdraw");
+
+        // CEI: zero the balance before the external call
+        pendingWithdrawals[msg.sender] = 0;
+
+        (bool ok, ) = payable(msg.sender).call{value: amount}("");
+        require(ok, "Withdraw failed");
+
+        emit Withdrawn(msg.sender, amount);
     }
 
     function fundRewards() external payable onlyOwner {

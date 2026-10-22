@@ -81,7 +81,9 @@ describe("Staking — lifecycle (I1, I2, I3, I7)", function () {
 
     const stakeTime = await networkHelpers.time.latest();
     // Unstake's block will execute at exactly stakeTime + (duration - 1)
-    await networkHelpers.time.setNextBlockTimestamp(stakeTime + 7 * 24 * 60 * 60 - 1);
+    await networkHelpers.time.setNextBlockTimestamp(
+      stakeTime + 7 * 24 * 60 * 60 - 1,
+    );
 
     await expect(staking.connect(victor).unstake(0)).to.be.revertedWith(
       "Too early",
@@ -97,7 +99,9 @@ describe("Staking — lifecycle (I1, I2, I3, I7)", function () {
 
     const stakeTime = await networkHelpers.time.latest();
     // Unstake's block will execute at exactly stakeTime + duration
-    await networkHelpers.time.setNextBlockTimestamp(stakeTime + 7 * 24 * 60 * 60);
+    await networkHelpers.time.setNextBlockTimestamp(
+      stakeTime + 7 * 24 * 60 * 60,
+    );
 
     await staking.connect(victor).unstake(0);
     expect(await nft.ownerOf(0)).to.equal(victor.address);
@@ -122,5 +126,48 @@ describe("Staking — lifecycle (I1, I2, I3, I7)", function () {
     await expect(staking.connect(victor).unstake(0)).to.be.revertedWith(
       "Not staked",
     );
+  });
+
+  it("test_ReentrancyDuringUnstakeFails — CEI blocks reentry", async function () {
+    const { ethers, networkHelpers, nft, staking, victor } =
+      await deployFixture();
+    const stakingAddr = await staking.getAddress();
+    const nftAddr = await nft.getAddress();
+
+    // Deploy the adversarial staker
+    const Malicious = await ethers.deployContract("MaliciousReceiver", [
+      stakingAddr,
+      nftAddr,
+    ]);
+    await Malicious.waitForDeployment();
+    const maliciousAddr = await Malicious.getAddress();
+
+    // Give the malicious receiver token 0 (currently held by victor).
+    // transferFrom (not safeTransferFrom) — no callback, no reentry here.
+    await nft.connect(victor).transferFrom(victor.address, maliciousAddr, 0);
+
+    // Receiver stakes it
+    await Malicious.approveAndStake(0);
+
+    // Warp to exactly the lockup boundary
+    const stakeTime = await networkHelpers.time.latest();
+    await networkHelpers.time.setNextBlockTimestamp(
+      stakeTime + 7 * 24 * 60 * 60,
+    );
+
+    // The malicious receiver unstakes itself — reentry fires during the callback
+    await Malicious.doUnstake(0);
+
+    // I6: the reentry was attempted, but failed — state was already deleted
+    expect(await Malicious.reentered()).to.equal(true);
+    expect(await Malicious.reentrySucceeded()).to.equal(false);
+
+    // I1: only one NFT was moved, state is consistent
+    expect(await nft.ownerOf(0)).to.equal(maliciousAddr);
+    expect(await nft.balanceOf(stakingAddr)).to.equal(0);
+
+    // I3: the stake is deleted
+    const stake = await staking.stakes(0);
+    expect(stake.owner).to.equal(ethers.ZeroAddress);
   });
 });

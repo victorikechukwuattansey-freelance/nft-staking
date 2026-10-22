@@ -3,7 +3,7 @@ import { network } from "hardhat";
 
 // const { ethers } = await network.create();
 
-describe("Staking — I1 (escrow) + I2 (authorization)", function () {
+describe("Staking — lifecycle (I1, I2, I3, I7)", function () {
   async function deployFixture() {
     const { ethers, networkHelpers } = await network.create(); // or network.create()
     const [owner, victor, iyke] = await ethers.getSigners();
@@ -43,8 +43,9 @@ describe("Staking — I1 (escrow) + I2 (authorization)", function () {
 
     // Victor has NOT approved the staking contract to move token 0.
     // safeTransferFrom inside stake reverts with the ERC-721 authorization error.
-    await expect(staking.connect(victor).stake(0))
-      .to.be.revertedWithCustomError(nft, "ERC721InsufficientApproval");
+    await expect(
+      staking.connect(victor).stake(0),
+    ).to.be.revertedWithCustomError(nft, "ERC721InsufficientApproval");
 
     // I1: contract balance stays 0
     expect(await nft.balanceOf(stakingAddr)).to.equal(0);
@@ -66,6 +67,60 @@ describe("Staking — I1 (escrow) + I2 (authorization)", function () {
     await expect(staking.connect(iyke).unstake(0)).to.revert(
       ethers,
       "Not staker",
+    );
+  });
+
+  // ─── I7: Duration lockup ─────────────────────────────────────────────
+
+  it("test_RevertWhen_UnstakeBeforeDuration — cannot unstake early", async function () {
+    const { nft, staking, networkHelpers, victor } = await deployFixture();
+    const stakingAddr = await staking.getAddress();
+
+    await nft.connect(victor).approve(stakingAddr, 0);
+    await staking.connect(victor).stake(0);
+
+    const stakeTime = await networkHelpers.time.latest();
+    // Unstake's block will execute at exactly stakeTime + (duration - 1)
+    await networkHelpers.time.setNextBlockTimestamp(stakeTime + 7 * 24 * 60 * 60 - 1);
+
+    await expect(staking.connect(victor).unstake(0)).to.be.revertedWith(
+      "Too early",
+    );
+  });
+
+  it("test_UnstakeAtExactDuration — succeeds at the boundary", async function () {
+    const { nft, staking, networkHelpers, victor } = await deployFixture();
+    const stakingAddr = await staking.getAddress();
+
+    await nft.connect(victor).approve(stakingAddr, 0);
+    await staking.connect(victor).stake(0);
+
+    const stakeTime = await networkHelpers.time.latest();
+    // Unstake's block will execute at exactly stakeTime + duration
+    await networkHelpers.time.setNextBlockTimestamp(stakeTime + 7 * 24 * 60 * 60);
+
+    await staking.connect(victor).unstake(0);
+    expect(await nft.ownerOf(0)).to.equal(victor.address);
+  });
+
+  // ─── I3: Single unstake ──────────────────────────────────────────────
+
+  it("test_RevertWhen_UnstakeTwice — cannot unstake same token twice", async function () {
+    const { nft, staking, networkHelpers, victor } = await deployFixture();
+    const stakingAddr = await staking.getAddress();
+
+    await nft.connect(victor).approve(stakingAddr, 0);
+    await staking.connect(victor).stake(0);
+
+    await networkHelpers.time.increase(7 * 24 * 60 * 60);
+
+    // First unstake succeeds
+    await staking.connect(victor).unstake(0);
+    expect(await nft.ownerOf(0)).to.equal(victor.address);
+
+    // Second unstake reverts — `delete stakes[tokenId]` cleared the state
+    await expect(staking.connect(victor).unstake(0)).to.be.revertedWith(
+      "Not staked",
     );
   });
 });

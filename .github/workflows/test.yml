@@ -2,7 +2,7 @@ name: test
 on: [push, pull_request]
 
 jobs:
-  test:
+  hardhat:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -13,3 +13,16 @@ jobs:
       - run: npm ci
       - run: npx hardhat build
       - run: npx hardhat test
+
+  foundry:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - uses: foundry-rs/foundry-toolchain@v1
+      - run: forge build
+      - run: forge test --match-contract StakingInvariantTest -vv

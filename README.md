@@ -10,6 +10,8 @@ A fixed-duration NFT staking contract with a per-stake ETH reward, built with
 - **Authorization:** only the recorded staker can unstake
 - **Invariants:** ten properties specified in [`INVARIANTS.md`](./INVARIANTS.md), each with tests
 
+- **Live on Sepolia:** see [`DEPLOYMENTS.md`](./DEPLOYMENTS.md) for verified addresses and the full demo cycle.
+
 ## Design
 
 ### Reserve-at-stake, not payout-at-unstake

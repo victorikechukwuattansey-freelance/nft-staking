@@ -58,7 +58,7 @@ contract StakingDemo is IERC721Receiver, ReentrancyGuard, Ownable {
         uint256 amount = pendingWithdrawals[msg.sender];
         require(amount > 0, "Nothing to withdraw");
         pendingWithdrawals[msg.sender] = 0;
-        (bool ok, ) = payable(msg.sender).call{value: amount}("");
+        (bool ok,) = payable(msg.sender).call{value: amount}("");
         require(ok, "Withdraw failed");
         emit Withdrawn(msg.sender, amount);
     }
@@ -69,9 +69,7 @@ contract StakingDemo is IERC721Receiver, ReentrancyGuard, Ownable {
         emit Funded(msg.sender, msg.value);
     }
 
-    function onERC721Received(
-        address, address, uint256, bytes calldata
-    ) external pure override returns (bytes4) {
+    function onERC721Received(address, address, uint256, bytes calldata) external pure override returns (bytes4) {
         return IERC721Receiver.onERC721Received.selector;
     }
 }

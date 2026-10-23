@@ -42,9 +42,7 @@ contract MaliciousReceiver is IERC721Receiver {
         staking.withdraw();
     }
 
-    function onERC721Received(
-        address, address, uint256 tokenId, bytes calldata
-    ) external override returns (bytes4) {
+    function onERC721Received(address, address, uint256 tokenId, bytes calldata) external override returns (bytes4) {
         if (!unstakeReentered) {
             unstakeReentered = true;
             try staking.unstake(tokenId) {
